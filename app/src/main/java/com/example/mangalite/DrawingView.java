@@ -1,26 +1,61 @@
 package com.example.mangalite;
 
 import android.content.Context;
-import android.graphics.Bitmap;
-import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.Paint;
-import android.graphics.Path;
+import android.graphics.*;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.View;
+
+import java.util.ArrayList;
 
 public class DrawingView extends View {
 
-    private Bitmap bitmap;
-    private Canvas canvasBitmap;
+    public enum Tool {
+        BRUSH,
+        SELECT,
+        PATTERN_FILL
+    }
+
+    private Tool currentTool = Tool.BRUSH;
+
+    private ArrayList<Bitmap> layers = new ArrayList<>();
+    private int activeLayer = 0;
+    private Canvas layerCanvas;
+
     private Paint paint;
     private Path path;
+
+    private Rect selectionRect = null;
+    private float startX, startY;
+
+    private Bitmap patternBitmap = null;
+
+    // === ЗУМ И ПЕРЕМЕЩЕНИЕ ===
+    private float scaleFactor = 1.0f;
+    private float minScale = 0.5f;
+    private float maxScale = 4.0f;
+
+    private float offsetX = 0f;
+    private float offsetY = 0f;
+
+    private ScaleGestureDetector scaleDetector;
+
+    private float lastTouchX;
+    private float lastTouchY;
+    private boolean isPanning = false;
 
     public DrawingView(Context context) {
         super(context);
 
-        bitmap = Bitmap.createBitmap(1200, 1200, Bitmap.Config.ARGB_8888);
-        canvasBitmap = new Canvas(bitmap);
+        setFocusable(true);
+        setFocusableInTouchMode(true);
+
+        Bitmap base = Bitmap.createBitmap(1200, 1600, Bitmap.Config.ARGB_8888);
+        base.eraseColor(Color.WHITE);
+        layers.add(base);
+
+        layerCanvas = new Canvas(layers.get(activeLayer));
 
         paint = new Paint();
         paint.setColor(Color.BLACK);
@@ -29,35 +64,234 @@ public class DrawingView extends View {
         paint.setAntiAlias(true);
 
         path = new Path();
+
+        scaleDetector = new ScaleGestureDetector(context, new ScaleListener());
     }
 
     @Override
     protected void onDraw(Canvas canvas) {
-        canvas.drawColor(Color.WHITE);
-        canvas.drawBitmap(bitmap, 0, 0, null);
+
+        canvas.save();
+
+        canvas.translate(offsetX, offsetY);
+        canvas.scale(scaleFactor, scaleFactor);
+
+        for (Bitmap layer : layers) {
+            canvas.drawBitmap(layer, 0, 0, null);
+        }
+
+        if (currentTool == Tool.SELECT && selectionRect != null) {
+            Paint selectPaint = new Paint();
+            selectPaint.setColor(Color.RED);
+            selectPaint.setStyle(Paint.Style.STROKE);
+            selectPaint.setStrokeWidth(3);
+            canvas.drawRect(selectionRect, selectPaint);
+        }
+
         canvas.drawPath(path, paint);
+
+        canvas.restore();
     }
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
 
-        float x = event.getX();
-        float y = event.getY();
+        scaleDetector.onTouchEvent(event);
+
+        float x = (event.getX() - offsetX) / scaleFactor;
+        float y = (event.getY() - offsetY) / scaleFactor;
+
+        if (event.getPointerCount() == 1 && !scaleDetector.isInProgress()) {
+
+            switch (currentTool) {
+
+                case BRUSH:
+                    handleBrush(event, x, y);
+                    break;
+
+                case SELECT:
+                    handleSelect(event, x, y);
+                    break;
+
+                case PATTERN_FILL:
+                    if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                        fillWithPattern();
+                    }
+                    break;
+            }
+
+            // Перемещение холста
+            if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                lastTouchX = event.getX();
+                lastTouchY = event.getY();
+                isPanning = true;
+            } else if (event.getAction() == MotionEvent.ACTION_MOVE && isPanning) {
+                float dx = event.getX() - lastTouchX;
+                float dy = event.getY() - lastTouchY;
+
+                offsetX += dx;
+                offsetY += dy;
+
+                lastTouchX = event.getX();
+                lastTouchY = event.getY();
+            } else if (event.getAction() == MotionEvent.ACTION_UP) {
+                isPanning = false;
+            }
+        }
+
+        invalidate();
+        return true;
+    }
+
+    // === PINCH ZOOM ===
+    private class ScaleListener extends ScaleGestureDetector.SimpleOnScaleGestureListener {
+        @Override
+        public boolean onScale(ScaleGestureDetector detector) {
+            scaleFactor *= detector.getScaleFactor();
+            scaleFactor = Math.max(minScale, Math.min(scaleFactor, maxScale));
+            invalidate();
+            return true;
+        }
+    }
+
+    // === КИСТЬ ===
+    private void handleBrush(MotionEvent event, float x, float y) {
+
+        switch (event.getAction()) {
+            case MotionEvent.ACTION_DOWN:
+                path.moveTo(x, y);
+                break;
+            case MotionEvent.ACTION_MOVE:
+                path.lineTo(x, y);
+                break;
+            case MotionEvent.ACTION_UP:
+                layerCanvas.drawPath(path, paint);
+                path.reset();
+                break;
+        }
+    }
+
+    // === ВЫДЕЛЕНИЕ ===
+    private void handleSelect(MotionEvent event, float x, float y) {
 
         switch (event.getAction()) {
 
             case MotionEvent.ACTION_DOWN:
-                path.moveTo(x, y);
+                startX = x;
+                startY = y;
                 break;
 
             case MotionEvent.ACTION_MOVE:
-                path.lineTo(x, y);
+                selectionRect = new Rect(
+                        (int) Math.min(startX, x),
+                        (int) Math.min(startY, y),
+                        (int) Math.max(startX, x),
+                        (int) Math.max(startY, y)
+                );
+                break;
+        }
+    }
+
+    public void definePattern() {
+
+        if (selectionRect == null) return;
+
+        Bitmap source = layers.get(activeLayer);
+
+        patternBitmap = Bitmap.createBitmap(
+                source,
+                selectionRect.left,
+                selectionRect.top,
+                selectionRect.width(),
+                selectionRect.height()
+        );
+    }
+
+    private void fillWithPattern() {
+
+        if (patternBitmap == null) return;
+
+        Paint patternPaint = new Paint();
+        BitmapShader shader = new BitmapShader(
+                patternBitmap,
+                Shader.TileMode.REPEAT,
+                Shader.TileMode.REPEAT
+        );
+
+        patternPaint.setShader(shader);
+
+        layerCanvas.drawRect(
+                0,
+                0,
+                layers.get(activeLayer).getWidth(),
+                layers.get(activeLayer).getHeight(),
+                patternPaint
+        );
+    }
+
+    public void setBaseImage(Bitmap bitmap) {
+
+        layers.clear();
+
+        Bitmap base = bitmap.copy(Bitmap.Config.ARGB_8888, true);
+        layers.add(base);
+
+        activeLayer = 0;
+        layerCanvas = new Canvas(layers.get(activeLayer));
+
+        invalidate();
+    }
+
+    public void addLayer() {
+
+        Bitmap newLayer = Bitmap.createBitmap(
+                layers.get(0).getWidth(),
+                layers.get(0).getHeight(),
+                Bitmap.Config.ARGB_8888
+        );
+
+        layers.add(newLayer);
+        activeLayer = layers.size() - 1;
+        layerCanvas = new Canvas(layers.get(activeLayer));
+    }
+
+    public void setTool(Tool tool) {
+        currentTool = tool;
+    }
+
+    // === КЛАВИАТУРА ===
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+
+        switch (keyCode) {
+
+            case KeyEvent.KEYCODE_PLUS:
+            case KeyEvent.KEYCODE_EQUALS:
+                scaleFactor *= 1.1f;
                 break;
 
-            case MotionEvent.ACTION_UP:
-                canvasBitmap.drawPath(path, paint);
-                path.reset();
+            case KeyEvent.KEYCODE_MINUS:
+                scaleFactor *= 0.9f;
                 break;
+
+            case KeyEvent.KEYCODE_DPAD_UP:
+                offsetY += 50;
+                break;
+
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                offsetY -= 50;
+                break;
+
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                offsetX += 50;
+                break;
+
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                offsetX -= 50;
+                break;
+
+            default:
+                return super.onKeyDown(keyCode, event);
         }
 
         invalidate();
