@@ -8,6 +8,7 @@ import android.view.ScaleGestureDetector;
 import android.view.View;
 
 import java.util.ArrayList;
+import java.util.Stack;
 
 public class DrawingView extends View {
 
@@ -31,7 +32,7 @@ public class DrawingView extends View {
 
     private Bitmap patternBitmap = null;
 
-    // === ЗУМ И ПЕРЕМЕЩЕНИЕ ===
+    // ====== ZOOM & MOVE ======
     private float scaleFactor = 1.0f;
     private float minScale = 0.5f;
     private float maxScale = 4.0f;
@@ -39,11 +40,14 @@ public class DrawingView extends View {
     private float offsetX = 0f;
     private float offsetY = 0f;
 
-    private ScaleGestureDetector scaleDetector;
+    private boolean canvasLocked = false;
 
-    private float lastTouchX;
-    private float lastTouchY;
-    private boolean isPanning = false;
+    private ScaleGestureDetector scaleDetector;
+    private float lastTouchX, lastTouchY;
+
+    // ====== UNDO REDO ======
+    private Stack<Bitmap> undoStack = new Stack<>();
+    private Stack<Bitmap> redoStack = new Stack<>();
 
     public DrawingView(Context context) {
         super(context);
@@ -68,6 +72,7 @@ public class DrawingView extends View {
         scaleDetector = new ScaleGestureDetector(context, new ScaleListener());
     }
 
+    // ===== DRAW =====
     @Override
     protected void onDraw(Canvas canvas) {
 
@@ -93,10 +98,13 @@ public class DrawingView extends View {
         canvas.restore();
     }
 
+    // ===== TOUCH =====
     @Override
     public boolean onTouchEvent(MotionEvent event) {
 
-        scaleDetector.onTouchEvent(event);
+        if (!canvasLocked) {
+            scaleDetector.onTouchEvent(event);
+        }
 
         float x = (event.getX() - offsetX) / scaleFactor;
         float y = (event.getY() - offsetY) / scaleFactor;
@@ -115,55 +123,54 @@ public class DrawingView extends View {
 
                 case PATTERN_FILL:
                     if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                        saveState();
                         fillWithPattern();
                     }
                     break;
             }
 
             // Перемещение холста
-            if (event.getAction() == MotionEvent.ACTION_DOWN) {
-                lastTouchX = event.getX();
-                lastTouchY = event.getY();
-                isPanning = true;
-            } else if (event.getAction() == MotionEvent.ACTION_MOVE && isPanning) {
-                float dx = event.getX() - lastTouchX;
-                float dy = event.getY() - lastTouchY;
-
-                offsetX += dx;
-                offsetY += dy;
-
-                lastTouchX = event.getX();
-                lastTouchY = event.getY();
-            } else if (event.getAction() == MotionEvent.ACTION_UP) {
-                isPanning = false;
+            if (!canvasLocked) {
+                if (event.getAction() == MotionEvent.ACTION_MOVE) {
+                    offsetX += event.getX() - lastTouchX;
+                    offsetY += event.getY() - lastTouchY;
+                }
             }
+
+            lastTouchX = event.getX();
+            lastTouchY = event.getY();
         }
 
         invalidate();
         return true;
     }
 
-    // === PINCH ZOOM ===
+    // ===== PINCH ZOOM =====
     private class ScaleListener extends ScaleGestureDetector.SimpleOnScaleGestureListener {
         @Override
         public boolean onScale(ScaleGestureDetector detector) {
-            scaleFactor *= detector.getScaleFactor();
-            scaleFactor = Math.max(minScale, Math.min(scaleFactor, maxScale));
+            if (!canvasLocked) {
+                scaleFactor *= detector.getScaleFactor();
+                scaleFactor = Math.max(minScale, Math.min(scaleFactor, maxScale));
+            }
             invalidate();
             return true;
         }
     }
 
-    // === КИСТЬ ===
+    // ===== BRUSH =====
     private void handleBrush(MotionEvent event, float x, float y) {
 
         switch (event.getAction()) {
             case MotionEvent.ACTION_DOWN:
+                saveState();
                 path.moveTo(x, y);
                 break;
+
             case MotionEvent.ACTION_MOVE:
                 path.lineTo(x, y);
                 break;
+
             case MotionEvent.ACTION_UP:
                 layerCanvas.drawPath(path, paint);
                 path.reset();
@@ -171,7 +178,7 @@ public class DrawingView extends View {
         }
     }
 
-    // === ВЫДЕЛЕНИЕ ===
+    // ===== SELECT =====
     private void handleSelect(MotionEvent event, float x, float y) {
 
         switch (event.getAction()) {
@@ -192,6 +199,7 @@ public class DrawingView extends View {
         }
     }
 
+    // ===== PATTERN =====
     public void definePattern() {
 
         if (selectionRect == null) return;
@@ -229,37 +237,68 @@ public class DrawingView extends View {
         );
     }
 
-    public void setBaseImage(Bitmap bitmap) {
+    // ===== UNDO REDO =====
+    private void saveState() {
+        Bitmap current = layers.get(activeLayer);
+        undoStack.push(current.copy(Bitmap.Config.ARGB_8888, true));
+        redoStack.clear();
+    }
 
-        layers.clear();
+    public void undo() {
+        if (!undoStack.isEmpty()) {
+            Bitmap current = layers.get(activeLayer);
+            redoStack.push(current.copy(Bitmap.Config.ARGB_8888, true));
 
-        Bitmap base = bitmap.copy(Bitmap.Config.ARGB_8888, true);
-        layers.add(base);
+            Bitmap previous = undoStack.pop();
+            layers.set(activeLayer, previous);
+            layerCanvas = new Canvas(previous);
+            invalidate();
+        }
+    }
 
-        activeLayer = 0;
-        layerCanvas = new Canvas(layers.get(activeLayer));
+    public void redo() {
+        if (!redoStack.isEmpty()) {
+            Bitmap current = layers.get(activeLayer);
+            undoStack.push(current.copy(Bitmap.Config.ARGB_8888, true));
 
-        invalidate();
+            Bitmap next = redoStack.pop();
+            layers.set(activeLayer, next);
+            layerCanvas = new Canvas(next);
+            invalidate();
+        }
+    }
+
+    // ===== LOCK =====
+    public void toggleCanvasLock() {
+        canvasLocked = !canvasLocked;
+    }
+
+    // ===== PUBLIC =====
+    public void setTool(Tool tool) {
+        currentTool = tool;
     }
 
     public void addLayer() {
-
         Bitmap newLayer = Bitmap.createBitmap(
                 layers.get(0).getWidth(),
                 layers.get(0).getHeight(),
                 Bitmap.Config.ARGB_8888
         );
-
         layers.add(newLayer);
         activeLayer = layers.size() - 1;
-        layerCanvas = new Canvas(layers.get(activeLayer));
+        layerCanvas = new Canvas(newLayer);
     }
 
-    public void setTool(Tool tool) {
-        currentTool = tool;
+    public void setBaseImage(Bitmap bitmap) {
+        layers.clear();
+        Bitmap base = bitmap.copy(Bitmap.Config.ARGB_8888, true);
+        layers.add(base);
+        activeLayer = 0;
+        layerCanvas = new Canvas(base);
+        invalidate();
     }
 
-    // === КЛАВИАТУРА ===
+    // ===== KEYBOARD =====
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
 
@@ -288,6 +327,14 @@ public class DrawingView extends View {
 
             case KeyEvent.KEYCODE_DPAD_RIGHT:
                 offsetX -= 50;
+                break;
+
+            case KeyEvent.KEYCODE_Z:
+                if (event.isCtrlPressed()) undo();
+                break;
+
+            case KeyEvent.KEYCODE_Y:
+                if (event.isCtrlPressed()) redo();
                 break;
 
             default:
